@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
+	"os"
+	"time"
 
+	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
 )
 
@@ -28,7 +31,7 @@ func (s *APIServer) Run() {
 	// router.Use(middleware)
 
 	router.HandleFunc("/account", createHTTPHandler(s.handleAccounts))
-	router.HandleFunc("/account/{id}", createHTTPHandler(s.handleAccount))
+	router.HandleFunc("/account/{id}", withJWTAuth(createHTTPHandler(s.handleAccount), s.store))
 	router.HandleFunc("/transfer", createHTTPHandler(s.handleTransferAccount))
 
 	log.Println("JSON api server is running on port: ", s.listenAddr)
@@ -86,12 +89,9 @@ func (s *APIServer) handleGetAccounts(w http.ResponseWriter, _r *http.Request) e
 
 func (s *APIServer) handleGetAccount(w http.ResponseWriter, r *http.Request) error {
 
-	id, err := parseId(r)
-	if err != nil {
-		return err
-	}
+	id := mux.Vars(r)["id"]
 
-	if account, err := s.store.GetAccountById(int(id)); err != nil {
+	if account, err := s.store.GetAccountById(id); err != nil {
 		return WriteJSON(w, http.StatusOK, &account)
 	} else {
 		return err
@@ -108,30 +108,79 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 
 	account := NewAccount(accountRequest.FirstName, accountRequest.LastName)
 
-	if insertedId, err := s.store.CreateAccount(account); err != nil {
-		return err
-	} else {
-		return WriteJSON(w, http.StatusOK, map[string]string{"created": insertedId})
-	}
+	insertedId, err := s.store.CreateAccount(account)
 
-}
-
-func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) error {
-	id, err := parseId(r)
 	if err != nil {
 		return err
 	}
 
-	if err := s.store.DeleteAccount(int(id)); err != nil {
+	account.Id = insertedId
+
+	tokenString, err := createJWT(account)
+
+	if err != nil {
 		return err
 	}
-	return WriteJSON(w, http.StatusOK, map[string]int{"deleted": id})
+
+	fmt.Println("token: ", tokenString)
+
+	w.Header().Add("Set-Cookie", `gb_session=`+tokenString)
+
+	return WriteJSON(w, http.StatusOK, map[string]string{"created": insertedId})
+
+}
+
+func (s *APIServer) handleDeleteAccount(w http.ResponseWriter, r *http.Request) error {
+	id := mux.Vars(r)["id"]
+
+	if err := s.store.DeleteAccount(id); err != nil {
+		return err
+	}
+	return WriteJSON(w, http.StatusOK, map[string]string{"deleted": id})
 
 }
 func (s *APIServer) handleTransferAccount(w http.ResponseWriter, r *http.Request) error {
 
 	return nil
 
+}
+
+func withJWTAuth(handlerFunc http.HandlerFunc, store Storage) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie("gb_session")
+
+		if err != nil {
+			WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "Access Denied"})
+			return
+		}
+
+		tokenStr := cookie.Value
+
+		token, err := validateJWT(tokenStr)
+
+		if err != nil || !token.Valid {
+			WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "Access Denied"})
+			return
+		}
+
+		claims := token.Claims.(jwt.MapClaims)
+
+		accountId := claims["accountId"].(string)
+		accountNumber := claims["accountNumber"].(string)
+
+		id := mux.Vars(r)["id"]
+
+		if id != accountId {
+			WriteJSON(w, http.StatusUnauthorized, ApiError{Error: "Access Denied"})
+			return
+		}
+
+		ctx := r.Context()
+		*r = *r.WithContext(context.WithValue(ctx, "account", map[string]string{accountId: accountId, accountNumber: accountNumber}))
+
+		handlerFunc(w, r)
+
+	}
 }
 
 func WriteJSON(w http.ResponseWriter, status int, v any) error {
@@ -144,7 +193,7 @@ func WriteJSON(w http.ResponseWriter, status int, v any) error {
 type apiFunc func(http.ResponseWriter, *http.Request) error
 
 type ApiError struct {
-	Error string
+	Error string `json:"error"`
 }
 
 func createHTTPHandler(f apiFunc) http.HandlerFunc {
@@ -156,17 +205,29 @@ func createHTTPHandler(f apiFunc) http.HandlerFunc {
 	}
 }
 
-func middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-	})
+func createJWT(account *Account) (string, error) {
+	claims := &jwt.MapClaims{
+		"expiresAt":     jwt.NewNumericDate(time.Now().Add(time.Minute * 2)),
+		"issuer":        "gobank",
+		"issuesAt":      jwt.NewNumericDate(time.Now()),
+		"accountNumber": account.Number,
+		"accountId":     account.Id,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	secret := []byte(os.Getenv("JWT_SECRET"))
+
+	return token.SignedString(secret)
 }
 
-func parseId(r *http.Request) (int, error) {
-	idStr := mux.Vars(r)["id"]
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		return id, fmt.Errorf("invalid id given %s", idStr)
-	}
-	return id, nil
+func validateJWT(token string) (*jwt.Token, error) {
+	secret := os.Getenv("JWT_SECRET")
+
+	return jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+
+		return []byte(secret), nil
+	})
 }

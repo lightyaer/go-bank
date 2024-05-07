@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
 
 	_ "github.com/lib/pq"
 	"github.com/nrednav/cuid2"
@@ -11,10 +12,10 @@ import (
 
 type Storage interface {
 	CreateAccount(*Account) (string, error)
-	DeleteAccount(int) error
+	DeleteAccount(string) error
 	UpdateAccount(*Account) error
 	GetAccounts() ([]*Account, error)
-	GetAccountById(int) (*Account, error)
+	GetAccountById(string) (*Account, error)
 }
 
 type PgStore struct {
@@ -22,8 +23,8 @@ type PgStore struct {
 }
 
 func NewPgStore() (*PgStore, error) {
-	connStr := "user=postgres password=postgres dbname=postgres sslmode=disable"
-	db, err := sql.Open("postgres", connStr)
+	dbConnectionString := os.Getenv("DB_CONN_STRING")
+	db, err := sql.Open("postgres", dbConnectionString)
 
 	if err != nil {
 		return nil, err
@@ -75,7 +76,7 @@ func (s *PgStore) CreateAccount(a *Account) (string, error) {
 	return insertedId, nil
 }
 
-func (s *PgStore) DeleteAccount(id int) error {
+func (s *PgStore) DeleteAccount(id string) error {
 
 	query := `DELETE FROM accounts WHERE id = $1`
 
@@ -91,7 +92,7 @@ func (s *PgStore) UpdateAccount(a *Account) error {
 	return err
 
 }
-func (s *PgStore) GetAccountById(id int) (*Account, error) {
+func (s *PgStore) GetAccountById(id string) (*Account, error) {
 
 	query := `SELECT * FROM accounts WHERE id = $1`
 
