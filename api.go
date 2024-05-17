@@ -30,13 +30,49 @@ func (s *APIServer) Run() {
 
 	// router.Use(middleware)
 
+	router.HandleFunc("/login", createHTTPHandler(s.handleLogin))
+
 	router.HandleFunc("/account", createHTTPHandler(s.handleAccounts))
-	router.HandleFunc("/account/{id}", withJWTAuth(createHTTPHandler(s.handleAccount), s.store))
+	router.HandleFunc("/account/{id}", withJWTAuth(createHTTPHandler(s.handleAccount)))
 	router.HandleFunc("/transfer", createHTTPHandler(s.handleTransferAccount))
 
 	log.Println("JSON api server is running on port: ", s.listenAddr)
 
 	http.ListenAndServe(s.listenAddr, router)
+}
+
+func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return fmt.Errorf("method not allowed %s", r.Method)
+	}
+
+	var req LoginRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return err
+	}
+
+	acc, err := s.store.GetAccountByNumber(string(req.Number))
+
+	if err != nil {
+		return err
+	}
+
+	if !acc.ValidPassword(req.Password) {
+		return fmt.Errorf("invalid password")
+	}
+
+	token, err := createJWT(acc)
+	if err != nil {
+		return err
+	}
+
+	response := LoginResponse{
+		Token:  token,
+		Number: acc.Number,
+	}
+
+	return WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *APIServer) handleAccount(w http.ResponseWriter, r *http.Request) error {
@@ -64,7 +100,7 @@ func (s *APIServer) handleAccounts(w http.ResponseWriter, r *http.Request) error
 	switch r.Method {
 	case http.MethodGet:
 		{
-			return s.handleGetAccounts(w, r)
+			return s.handleGetAccounts(w)
 		}
 	case http.MethodPost:
 		{
@@ -76,7 +112,7 @@ func (s *APIServer) handleAccounts(w http.ResponseWriter, r *http.Request) error
 
 }
 
-func (s *APIServer) handleGetAccounts(w http.ResponseWriter, _r *http.Request) error {
+func (s *APIServer) handleGetAccounts(w http.ResponseWriter) error {
 
 	accounts, err := s.store.GetAccounts()
 
@@ -89,12 +125,16 @@ func (s *APIServer) handleGetAccounts(w http.ResponseWriter, _r *http.Request) e
 
 func (s *APIServer) handleGetAccount(w http.ResponseWriter, r *http.Request) error {
 
-	id := mux.Vars(r)["id"]
+	accountId := r.Context().Value(keyAccount).(AuthRequestContext).Id
 
-	if account, err := s.store.GetAccountById(id); err != nil {
-		return WriteJSON(w, http.StatusOK, &account)
-	} else {
+	fmt.Println("account id: ", accountId)
+
+	if account, err := s.store.GetAccountById(accountId); err != nil {
 		return err
+	} else {
+		fmt.Printf("%v", account)
+		return WriteJSON(w, http.StatusOK, account)
+
 	}
 
 }
@@ -106,7 +146,11 @@ func (s *APIServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 
-	account := NewAccount(accountRequest.FirstName, accountRequest.LastName)
+	account, err := NewAccount(accountRequest.FirstName, accountRequest.LastName, accountRequest.Password)
+
+	if err != nil {
+		return err
+	}
 
 	insertedId, err := s.store.CreateAccount(account)
 
@@ -145,7 +189,7 @@ func (s *APIServer) handleTransferAccount(w http.ResponseWriter, r *http.Request
 
 }
 
-func withJWTAuth(handlerFunc http.HandlerFunc, store Storage) http.HandlerFunc {
+func withJWTAuth(handlerFunc http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("gb_session")
 
@@ -175,8 +219,7 @@ func withJWTAuth(handlerFunc http.HandlerFunc, store Storage) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-		*r = *r.WithContext(context.WithValue(ctx, "account", map[string]string{accountId: accountId, accountNumber: accountNumber}))
+		*r = *r.WithContext(context.WithValue(r.Context(), keyAccount, AuthRequestContext{Number: accountNumber, Id: accountId}))
 
 		handlerFunc(w, r)
 
